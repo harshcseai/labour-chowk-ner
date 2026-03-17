@@ -1,149 +1,239 @@
-# ner_service/main.py
-# Labour Chowk — Python NER Microservice
-# Run: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+# main.py — Labour Chowk NER Microservice
+# Deploy: https://labour-chowk-ner.onrender.com
+# Swagger UI: https://labour-chowk-ner.onrender.com/docs
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import spacy
 import os
 
-# ── App setup ────────────────────────────────────────────────────────────────
-app = FastAPI(title="Labour Chowk NER Service", version="1.0.0")
+# ══════════════════════════════════════════════════════════
+# APP SETUP
+# ══════════════════════════════════════════════════════════
+app = FastAPI(
+    title="Labour Chowk NER Service",
+    description="""
+## Labour Chowk — Named Entity Recognition API
 
-# CORS — NestJS aur React dono se calls aayengi
+Hindi/Bhojpuri/Hinglish text se worker profile extract karta hai.
+
+### Entities:
+- **NAME** — Worker ka naam
+- **GENDER** — Aadmi / Aurat / Mahila
+- **DOB_AGE** — Umar ya janam saal
+- **HOME_ADDRESS** — Ghar ka pata
+- **WORKING_ADDRESS** — Kaam dhundne ki jagah
+- **SKILL** — Kaam (Raj Mistri, Electrician, Plumber etc.)
+    """,
+    version="2.0.0",
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Production mein apna domain daalo
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Model load ────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+# MODEL LOAD
+# ══════════════════════════════════════════════════════════
 MODEL_PATH = os.getenv("NER_MODEL_PATH", "./labour_chowk_model/model-best")
 
-print(f"Loading NER model from: {MODEL_PATH}")
+print(f"Loading model from: {MODEL_PATH}")
 try:
     nlp = spacy.load(MODEL_PATH)
-    print("✅ NER Model loaded successfully!")
+    print("Model loaded!")
 except Exception as e:
-    print(f"❌ Model load failed: {e}")
+    print(f"Model load failed: {e}")
     nlp = None
 
-# ── Request / Response schemas ────────────────────────────────────────────────
-class NERRequest(BaseModel):
-    text: str              # "humar naam ramesh ba..."
-    language: str = "hi"   # hi = Hindi, bh = Bhojpuri (future use)
+# ══════════════════════════════════════════════════════════
+# SCHEMAS
+# ══════════════════════════════════════════════════════════
 
-class Entity(BaseModel):
+class ExtractRequest(BaseModel):
     text: str
-    label: str
-    start: int
-    end: int
 
-class NERResponse(BaseModel):
-    original_text: str
-    entities: dict         # {"NAME": "ramesh", "SKILL": "rajmistri", ...}
-    all_entities: list     # raw list with positions
-    profile_complete: bool # sare required fields mile ya nahi
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "text": "humar naam ramesh ba, hum rajmistri bani, 30 saal ke bani, nalanda se bani, patna station pe kaam chahiye"
+            }
+        }
 
-# ── Required fields for a complete profile ───────────────────────────────────
-REQUIRED_FIELDS = ["NAME", "SKILL"]
-OPTIONAL_FIELDS = ["GENDER", "DOB_AGE", "HOME_ADDRESS", "WORKING_ADDRESS"]
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+class StepRequest(BaseModel):
+    text: str
+    current_profile: Optional[dict] = {}
 
-@app.get("/")
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "text": "mera naam sunita hai, main painter hoon",
+                "current_profile": {}
+            }
+        }
+
+
+class BulkRequest(BaseModel):
+    texts: list
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "texts": [
+                    "naam ba ramesh, rajmistri bani",
+                    "mera naam sunita hai, painter hoon, 25 saal",
+                ]
+            }
+        }
+
+
+# ══════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════
+
+QUESTIONS = {
+    "NAME":             "Aapka naam kya hai?",
+    "SKILL":            "Aap kaunsa kaam karte hain? Jaise raj mistri, electrician, painter...",
+    "GENDER":           "Aap aadmi hain ya aurat?",
+    "DOB_AGE":          "Aapki umar kitni hai?",
+    "HOME_ADDRESS":     "Aap kahan ke rehne wale hain?",
+    "WORKING_ADDRESS":  "Aap abhi kahan kaam dhundh rahe hain?",
+}
+
+REQUIRED   = ["NAME", "SKILL"]
+ALL_FIELDS = ["NAME", "SKILL", "GENDER", "DOB_AGE", "HOME_ADDRESS", "WORKING_ADDRESS"]
+
+
+def run_ner(text: str) -> dict:
+    doc = nlp(text.strip())
+    entities = {}
+    raw = []
+    for ent in doc.ents:
+        if ent.label_ not in entities:
+            entities[ent.label_] = ent.text
+        raw.append({
+            "text":  ent.text,
+            "label": ent.label_,
+            "start": ent.start_char,
+            "end":   ent.end_char,
+        })
+    return {"entities": entities, "raw": raw}
+
+
+# ══════════════════════════════════════════════════════════
+# ROUTES
+# ══════════════════════════════════════════════════════════
+
+@app.get("/", tags=["Health"])
 def root():
     return {
-        "service": "Labour Chowk NER Microservice",
-        "status": "running",
-        "model_loaded": nlp is not None
+        "service":      "Labour Chowk NER Microservice",
+        "status":       "running",
+        "model_loaded": nlp is not None,
+        "version":      "2.0.0",
+        "docs":         "/docs",
     }
 
-@app.get("/health")
+
+@app.get("/health", tags=["Health"])
 def health():
     return {"status": "ok", "model_loaded": nlp is not None}
 
 
-@app.post("/extract", response_model=NERResponse)
-def extract_entities(request: NERRequest):
+@app.post("/extract", tags=["NER"])
+def extract(req: ExtractRequest):
     """
-    Main endpoint — text lo, entities nikaalo.
-    NestJS backend yahan POST karega.
+    Text se saari entities ek saath extract karo.
+    NestJS backend mainly yahi endpoint use karega.
     """
-    if nlp is None:
-        raise HTTPException(status_code=503, detail="NER model not loaded")
+    if not nlp:
+        raise HTTPException(503, "Model not loaded")
+    if not req.text.strip():
+        raise HTTPException(400, "Text empty hai")
 
-    if not request.text or len(request.text.strip()) == 0:
-        raise HTTPException(status_code=400, detail="Text cannot be empty")
-
-    # SpaCy se process karo
-    doc = nlp(request.text.strip())
-
-    # Entities extract karo
-    entities_dict = {}
-    all_entities  = []
-
-    for ent in doc.ents:
-        label = ent.label_
-        # Agar same label ke multiple entities hain toh pehla lo
-        if label not in entities_dict:
-            entities_dict[label] = ent.text
-        all_entities.append({
-            "text":  ent.text,
-            "label": label,
-            "start": ent.start_char,
-            "end":   ent.end_char
-        })
-
-    # Check karo profile complete hai ya nahi
-    profile_complete = all(field in entities_dict for field in REQUIRED_FIELDS)
-
-    return NERResponse(
-        original_text    = request.text,
-        entities         = entities_dict,
-        all_entities     = all_entities,
-        profile_complete = profile_complete
-    )
-
-
-@app.post("/extract-step")
-def extract_step(request: NERRequest):
-    """
-    Step-by-step voice flow ke liye —
-    Batao kaunsa field abhi tak mila aur kaunsa baaki hai.
-    NestJS isko use karega yeh decide karne ke liye ki
-    user se aage kya poochha jaaye.
-    """
-    if nlp is None:
-        raise HTTPException(status_code=503, detail="NER model not loaded")
-
-    doc = nlp(request.text.strip())
-
-    found = {}
-    for ent in doc.ents:
-        if ent.label_ not in found:
-            found[ent.label_] = ent.text
-
-    all_fields    = REQUIRED_FIELDS + OPTIONAL_FIELDS
-    missing       = [f for f in all_fields if f not in found]
-    next_question = QUESTIONS.get(missing[0]) if missing else None
+    result      = run_ner(req.text)
+    entities    = result["entities"]
+    is_complete = all(f in entities for f in REQUIRED)
+    missing     = [f for f in ALL_FIELDS if f not in entities]
 
     return {
-        "found":          found,
+        "original_text":  req.text,
+        "entities":       entities,
+        "raw_entities":   result["raw"],
+        "is_complete":    is_complete,
         "missing_fields": missing,
-        "next_question":  next_question,
-        "is_complete":    len(missing) == 0
     }
 
 
-# ── Question prompts (NestJS in these as next prompt) ────────────────────────
-QUESTIONS = {
-    "NAME":             "Aapka naam kya hai?",
-    "GENDER":           "Aap aadmi hain ya aurat?",
-    "DOB_AGE":          "Aapki umar kitni hai ya janam saal kya hai?",
-    "HOME_ADDRESS":     "Aap kahan ke rehne wale hain? Apna gaon ya jila batayein.",
-    "WORKING_ADDRESS":  "Aap abhi kahan kaam dhundh rahe hain?",
-    "SKILL":            "Aap kaunsa kaam karte hain? Jaise raj mistri, electrician, painter...",
-}
+@app.post("/extract-step", tags=["NER"])
+def extract_step(req: StepRequest):
+    """
+    Step-by-step voice profile ke liye.
+    Har ek voice answer ke baad call karo — next_question batayega.
+    """
+    if not nlp:
+        raise HTTPException(503, "Model not loaded")
+
+    result = run_ner(req.text)
+    found  = result["entities"]
+    merged = {**(req.current_profile or {}), **found}
+
+    missing       = [f for f in ALL_FIELDS if f not in merged]
+    next_question = QUESTIONS.get(missing[0]) if missing else None
+    is_complete   = len(missing) == 0
+
+    return {
+        "extracted_this_turn": found,
+        "merged_profile":      merged,
+        "missing_fields":      missing,
+        "next_question":       next_question,
+        "is_complete":         is_complete,
+    }
+
+
+@app.post("/extract-bulk", tags=["NER"])
+def extract_bulk(req: BulkRequest):
+    """
+    Multiple texts ek saath process karo — ek merged profile milega.
+    """
+    if not nlp:
+        raise HTTPException(503, "Model not loaded")
+    if not req.texts:
+        raise HTTPException(400, "Texts list empty hai")
+
+    results = []
+    for text in req.texts:
+        if str(text).strip():
+            r = run_ner(str(text))
+            results.append({"text": text, "entities": r["entities"]})
+
+    merged = {}
+    for r in results:
+        for k, v in r["entities"].items():
+            if k not in merged:
+                merged[k] = v
+
+    return {
+        "individual_results": results,
+        "merged_profile":     merged,
+        "is_complete":        all(f in merged for f in REQUIRED),
+        "missing_fields":     [f for f in ALL_FIELDS if f not in merged],
+    }
+
+
+@app.get("/questions", tags=["Config"])
+def get_questions():
+    """Frontend ke liye saare questions ki list."""
+    return {
+        "questions": [
+            {"field": field, "question": question}
+            for field, question in QUESTIONS.items()
+        ],
+        "required_fields": REQUIRED,
+        "all_fields":      ALL_FIELDS,
+    }
